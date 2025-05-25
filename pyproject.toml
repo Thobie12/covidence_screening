@@ -1,0 +1,15 @@
+[project]
+name = "covidence"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "colorlog>=6.9.0",
+    "google-genai>=1.16.1",
+    "pandas>=2.2.3",
+    "playwright>=1.52.0",
+    "python-dotenv>=1.1.0",
+    "ratelimit>=2.2.1",
+    "tenacity>=9.1.2",
+]
