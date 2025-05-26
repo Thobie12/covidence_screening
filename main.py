@@ -1,6 +1,7 @@
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import os
+import logging
 import csv
 from utils import *
 from google import genai
@@ -10,6 +11,7 @@ from google.genai import types
 import time
 import functools
 import pandas as pd
+import random
 # from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
 
 load_dotenv()
@@ -27,7 +29,7 @@ def log_exceptions(func):
     return wrapper
 
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
 # google_search_tool = Tool(
 #     google_search=GoogleSearch()
 # )
@@ -43,38 +45,53 @@ def load_existing_titles(path):
 @limits(calls=100, period=60)
 @sleep_and_retry
 def gemini_decision(title, abstract, source_info):
-    full_prompt = USER_PROMPT + \
-        f"""\nTitle: {title}\nAbstract: {abstract}\n Source Info: {source_info}\n"""
-
-    response = client.models.generate_content(
-        model="gemini-2.5-pro-preview-05-06",
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=ClassificationResult,
-            system_instruction=SYSTEM_PROMPT,
-
-        ),
-        contents=full_prompt,
-    )
-
-    if response.usage_metadata and response.usage_metadata.total_token_count:
-        tot = response.usage_metadata.total_token_count
-        logger.info(f"Token Usage: {tot}")
-    else:
-        logger.warning("Token usage information not available.")
-        tot = 0
-
-    if not response.parsed:
-        logger.error(f"No parsed response received from Gemini. \n{response}")
+    api_keys = os.getenv("GEMINI_API_KEY", "").split(",")
+    if not api_keys:
+        logger.error("No GEMINI_API_KEY found in environment.")
         return None, 0
 
-    parsed: ClassificationResult = response.parsed
+    full_prompt = USER_PROMPT + f"""
+        Title: {title}
+        Abstract: {abstract}
+        Source Info: {source_info}
+        """
 
-    logger.info(f"Gemini classification: {parsed.classification.value}")
-    logger.info(f"Gemini justification: {parsed.justification}")
+    for key in random.sample(api_keys, len(api_keys)): 
+        try:
+            client = genai.Client(api_key=key)
+            response = client.models.generate_content(
+                model="gemini-2.5-pro-preview-05-06",
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ClassificationResult,
+                    system_instruction=SYSTEM_PROMPT,
+                ),
+                contents=full_prompt,
+            )
 
-    return parsed, tot
+            token_usage = getattr(response.usage_metadata, 'total_token_count', 0)
+            if token_usage:
+                logger.info(f"Token Usage: {token_usage}")
+            else:
+                logger.warning("Token usage information not available.")
 
+            if not hasattr(response, "parsed") or not response.parsed:
+                logger.error(f"No parsed response from Gemini with key ending in {key[-4:]}.")
+                continue  
+
+            parsed: ClassificationResult = response.parsed
+            logger.info(f"Gemini classification: {parsed.classification.value}")
+            logger.info(f"Gemini justification: {parsed.justification}")
+
+            return parsed, token_usage
+
+        except Exception as e:
+            logger.warning(f"API key ending in {key[-4:]} failed: {e}")
+
+    logger.error("All API keys failed.")
+    return None, 0
+        
+        
 
 def handle_popover(page):
     try:
