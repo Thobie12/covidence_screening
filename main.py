@@ -1,7 +1,6 @@
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import os
-import logging
 import csv
 from utils import *
 from google import genai
@@ -10,9 +9,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from google.genai import types
 import time
 import functools
+import pandas as pd
+# from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
 
 load_dotenv()
 logger = init_logging()
+
 
 def log_exceptions(func):
     @functools.wraps(func)
@@ -21,22 +23,28 @@ def log_exceptions(func):
             return func(*args, **kwargs)
         except Exception as e:
             logger.exception(f"Exception in {func.__name__}: {e}")
-            raise 
+            raise
     return wrapper
 
+
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# google_search_tool = Tool(
+#     google_search=GoogleSearch()
+# )
+
 
 def load_existing_titles(path):
     if not os.path.exists(path):
-        return set()
-    with open(path, newline='', encoding='utf-8') as f:
-        return {row["title"].strip() for row in csv.DictReader(f)}
+        return pd.DataFrame(columns=["title", "abstract", "decision", "justification"]).set_index("title")
+
+    return pd.read_csv(path).drop_duplicates(subset=["title"], keep='first').set_index("title")
 
 
 @limits(calls=100, period=60)
 @sleep_and_retry
-def gemini_decision(title, abstract):
-    full_prompt = USER_PROMPT + f"""\nTitle: {title}\nAbstract: {abstract}"""
+def gemini_decision(title, abstract, source_info):
+    full_prompt = USER_PROMPT + \
+        f"""\nTitle: {title}\nAbstract: {abstract}\n Source Info: {source_info}\n"""
 
     response = client.models.generate_content(
         model="gemini-2.5-pro-preview-05-06",
@@ -44,6 +52,7 @@ def gemini_decision(title, abstract):
             response_mime_type="application/json",
             response_schema=ClassificationResult,
             system_instruction=SYSTEM_PROMPT,
+
         ),
         contents=full_prompt,
     )
@@ -54,7 +63,7 @@ def gemini_decision(title, abstract):
     else:
         logger.warning("Token usage information not available.")
         tot = 0
-        
+
     if not response.parsed:
         logger.error(f"No parsed response received from Gemini. \n{response}")
         return None, 0
@@ -67,6 +76,36 @@ def gemini_decision(title, abstract):
     return parsed, tot
 
 
+def handle_popover(page):
+    try:
+        if page.is_visible('button[aria-label="Close popover"]'):
+            page.click('button[aria-label="Close popover"]')
+    except Exception as e:
+        logger.debug(f"Popover close attempt failed: {e}")
+
+
+def extract_study_elements(top_study):
+    try:
+        title = top_study.query_selector('h3.title').inner_text().strip()
+        abstract = top_study.query_selector(
+            'div.abstract').inner_text().strip()
+        source_info = top_study.query_selector(
+            'div.source-info').inner_text().strip()
+        return title, abstract, source_info
+    except Exception as e:
+        logger.warning(f"Failed to extract study details: {e}")
+        return "", "", ""
+
+
+def vote_on_study(top_study, value):
+    try:
+        top_study.query_selector(
+            f'td.vote button[value="{value}"]').click(force=True)
+        logger.info(f"Voted '{value}' on study.")
+    except Exception as e:
+        logger.warning(f"Could not vote '{value}' on study: {e}")
+
+
 @log_exceptions
 @retry(
     reraise=True,
@@ -77,46 +116,59 @@ def classify_single_article(page, seen_titles):
     page.reload()
     page.wait_for_load_state("networkidle")
     page.wait_for_selector('tr[id^="study-"]', timeout=6000)
-    
-    if page.is_visible('button[aria-label="Close popover"]'):
-        page.click('button[aria-label="Close popover"]')
-    
+
+    handle_popover(page)
+
     top_study = page.query_selector('tr[id^="study-"]')
     if not top_study:
         logger.info("No study found.")
-        return None, 0  
-
-    title = top_study.query_selector('h3.title').inner_text().strip()
-    abstract = top_study.query_selector('div.abstract').inner_text().strip()
-    
-    if title in seen_titles:
-        logger.warning(f"Study '{title}' has already been processed, skipping.")
         return None, 0
+
+    title, abstract, source_info = extract_study_elements(top_study)
 
     if not title or not abstract:
-        logger.warning("Title or abstract is empty, skipping.")
-        return None, 0
+        logger.warning("Missing title or abstract. Voting 'Maybe'.")
+        vote_on_study(top_study, "Maybe")
+        return {
+            "title": title or "[MISSING]",
+            "abstract": abstract or "[MISSING]",
+            "decision": "Maybe",
+            "justification": "Title or abstract not found."
+        }, 0
 
-    logger.info(f"Processing study: {title}")
-    logger.info(f"Abstract: {abstract}")
+    if title in seen_titles.index:
+        existing = seen_titles.loc[title]
+        logger.info(f"Already classified '{title}' as {existing['decision']}")
+        return existing.to_dict(), 0
 
-    classification_result, tokens_used = gemini_decision(title, abstract)
-    
+    logger.info(f"Processing: {title}")
+    logger.debug(f"Abstract: {abstract}")
+    logger.debug(f"Source Info: {source_info}")
+
+    classification_result, tokens_used = gemini_decision(
+        title, abstract, source_info)
+
     if not classification_result:
-        logger.error("Classification result is None, skipping this article.")
+        logger.error("Gemini returned no classification. Skipping.")
         return None, 0
 
-    value = "Yes" if classification_result.classification.value == "Include" else "No" if classification_result.classification.value == "Exclude" else "Maybe"
-    top_study.query_selector(f'td.vote button[value="{value}"]').click(force=True)
+    decision_map = {
+        "Include": "Yes",
+        "Exclude": "No",
+        "Maybe": "Maybe"
+    }
 
-    article_data = {
+    vote = decision_map.get(
+        classification_result.classification.value, "Maybe")
+    vote_on_study(top_study, vote)
+
+    return {
         "title": title,
         "abstract": abstract,
         "decision": classification_result.classification.value,
         "justification": classification_result.justification
-    }
+    }, tokens_used
 
-    return article_data, tokens_used
 
 def main():
     seen_titles = load_existing_titles(OUTPUT_CSV)
@@ -139,7 +191,8 @@ def main():
         try:
             while processed_articles < ARTICLES_TO_PROCESS:
                 start_time = time.time()
-                article, tokens_used = classify_single_article(page, seen_titles)
+                article, tokens_used = classify_single_article(
+                    page, seen_titles)
                 if article:
                     processed_data.append(article)
                     processed_articles += 1
@@ -149,9 +202,10 @@ def main():
                     logger.info("Not a valid study. Moving on...")
                     # break
                 elapsed_time = time.time() - start_time
-                logger.info(f"Time taken for this article: {elapsed_time:.2f} seconds")
+                logger.info(
+                    f"Time taken for this article: {elapsed_time:.2f} seconds")
                 logger.info("*" * 30 + '\n')
-                # page.wait_for_timeout(500) 
+                # page.wait_for_timeout(500)
 
         except Exception as e:
             logger.exception("An error occurred during classification loop")
@@ -163,7 +217,8 @@ def main():
 
             output_csv_exists = os.path.exists(OUTPUT_CSV)
             with open(OUTPUT_CSV, 'a+', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=["title", "abstract", "decision", "justification"])
+                writer = csv.DictWriter(csvfile, fieldnames=[
+                                        "title", "abstract", "decision", "justification"])
                 if not output_csv_exists:
                     writer.writeheader()
                 writer.writerows(processed_data)
@@ -171,6 +226,7 @@ def main():
             logger.info("Data written to CSV successfully.")
             time.sleep(5)
             browser.close()
+
 
 if __name__ == "__main__":
     main()

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict
 from enum import Enum
 
+
 class Classification(Enum):
     INCLUDE = "Include"
     EXCLUDE = "Exclude"
@@ -11,20 +12,22 @@ class Classification(Enum):
 
 
 class ClassificationResult(BaseModel):
-    classification: Classification = Field(..., description="Classification of the article: Include, Exclude, or Maybe")
-    justification: str = Field(..., description="Justification for the classification")
+    classification: Classification = Field(
+        ..., description="Classification of the article: Include, Exclude, or Maybe")
+    justification: str = Field(...,
+                               description="Justification for the classification")
 
 
-ARTICLES_TO_PROCESS = 6
+ARTICLES_TO_PROCESS = 3400
 OUTPUT_CSV = 'processed_articles.csv'
 SIGN_IN_URL = "https://app.covidence.org"
 SCREENING_URL = "https://app.covidence.org/reviews/520996/review_studies/screen?filter=vote_required_from"
 
 
-SYSTEM_PROMPT= """
-You are an AI research assistant specializing in systematic reviews. The user will provide a protocol for a review titled "Retinal Hemorrhage Patterns in Abusive vs. Non-Abusive Head Trauma in Children."
+SYSTEM_PROMPT = """
+You are an AI research assistant specializing in systematic reviews. The user will provide a protocol for a review titled "Retinal Hemorrhage Patterns in Abusive vs. Non-Abusive Head Trauma in Children." and you are supposed to classify articles based on this protocol as to whether they should be included, excluded, or require further review.
 Your primary directive is to master this specific protocol. All your assistance—including clarifying details, evaluating studies against inclusion/exclusion criteria, identifying data for extraction, and supporting manuscript development—must be strictly grounded in the provided protocol's content, particularly its objectives and criteria.
-Maintain a precise, objective tone, and always base your reasoning on the given protocol.
+Maintain a precise, objective tone, and always base your reasoning on the given protocol. Strongly prefer a definitive classification like Include or Exclude. Use 'Maybe' only when the information is genuinely insufficient to make a clear decision.
 """
 
 USER_PROMPT = """
@@ -50,7 +53,7 @@ Evaluate if combining RH with other clinical signs (e.g., intracranial hemorrhag
 
 Inclusion Criteria: 
 1.	Articles published between 1999 to 2024. 
-2.	Randomized and non-randomized controlled trials, observational studies (retrospective and prospective cohorts, case-control, case series), cross-sectional analyses and mixed-methods studies.
+2.	Randomized and non-randomized controlled trials, observational studies (retrospective and prospective cohorts, case-control, case series), cross-sectional analyses and mixed-methods studies. Only original studies should be included
 3.	Published articles. 
 4.	Articles published in English.
 5.	Articles with a population of infants (newborns to 5 years old)
@@ -58,12 +61,13 @@ Inclusion Criteria:
 7.	Abusive or non-abusive head trauma that have reported retinal hemorrhage
 Exclusion Criteria: 
 1.	Articles published outside of the specified timeline. 
-2.	All sources of grey literature such as presentations from academic conferences, and studies and evaluations produced from Non-Governmental Organisations (NGOs), letter to the editors, short communications, reports and policy documents published by government agencies at the local or national level
+2.	All sources of grey literature such as presentations from academic conferences, and studies and evaluations produced from Non-Governmental Organisations (NGOs), letter to the editors, short communications, reports and policy documents published by government agencies at the local or national level. 
 3.	Articles in preprint
 4.	Articles written in languages other than English or with no available translation.
 5.	Articles focused on populations older than 5 years old.
 6.	Exclude non-abusive causes that are extremely rare.
 7.	Studies without relevant data
+8.  ⁠Exclude all review articles like Narrative reviews, Systematic reviews etc
 
 <>
 
@@ -76,11 +80,13 @@ Provide a brief justification for your classification.
 For Include, briefly state how it meets key inclusion criteria.
 For Exclude, clearly state which specific inclusion criterion it fails OR which specific exclusion criterion (by number, if possible) it meets.
 For Maybe, explain what specific information is missing or ambiguous in the provided text that requires checking the full article against the protocol's criteria.
-While a definitive 'Include' or 'Exclude' is preferred, prioritize accuracy. Do not force a classification if the provided information is genuinely insufficient.
+
+Strongly prefer a definitive classification like Include or Exclude. Use 'Maybe' only when the information is genuinely insufficient to make a clear decision. You can also search the web for more information about the article to help you make a decision.
 
 Here is the title and abstract of the article:
 
 """
+
 
 def init_logging():
     logger = logging.getLogger('covidence')
