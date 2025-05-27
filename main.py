@@ -1,7 +1,6 @@
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import os
-import logging
 import csv
 from utils import *
 from google import genai
@@ -29,7 +28,6 @@ def log_exceptions(func):
     return wrapper
 
 
-
 # google_search_tool = Tool(
 #     google_search=GoogleSearch()
 # )
@@ -39,7 +37,7 @@ def load_existing_titles(path):
     if not os.path.exists(path):
         return pd.DataFrame(columns=["title", "abstract", "decision", "justification"]).set_index("title")
 
-    return pd.read_csv(path).drop_duplicates(subset=["title"], keep='first').set_index("title")
+    return pd.read_csv(path).drop_duplicates(subset=["title"]).set_index("title")
 
 
 @limits(calls=100, period=60)
@@ -56,7 +54,7 @@ def gemini_decision(title, abstract, source_info):
         Source Info: {source_info}
         """
 
-    for key in random.sample(api_keys, len(api_keys)): 
+    for key in random.sample(api_keys, len(api_keys)):
         try:
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
@@ -69,18 +67,21 @@ def gemini_decision(title, abstract, source_info):
                 contents=full_prompt,
             )
 
-            token_usage = getattr(response.usage_metadata, 'total_token_count', 0)
+            token_usage = getattr(response.usage_metadata,
+                                  'total_token_count', 0)
             if token_usage:
                 logger.info(f"Token Usage: {token_usage}")
             else:
                 logger.warning("Token usage information not available.")
 
             if not hasattr(response, "parsed") or not response.parsed:
-                logger.error(f"No parsed response from Gemini with key ending in {key[-4:]}.")
-                continue  
+                logger.error(
+                    f"No parsed response from Gemini with key ending in {key[-4:]}.")
+                continue
 
             parsed: ClassificationResult = response.parsed
-            logger.info(f"Gemini classification: {parsed.classification.value}")
+            logger.info(
+                f"Gemini classification: {parsed.classification.value}")
             logger.info(f"Gemini justification: {parsed.justification}")
 
             return parsed, token_usage
@@ -90,8 +91,7 @@ def gemini_decision(title, abstract, source_info):
 
     logger.error("All API keys failed.")
     return None, 0
-        
-        
+
 
 def handle_popover(page):
     try:
@@ -154,8 +154,10 @@ def classify_single_article(page, seen_titles):
         }, 0
 
     if title in seen_titles.index:
-        existing = seen_titles.loc[title]
+        existing = seen_titles.loc[title][0]
         logger.info(f"Already classified '{title}' as {existing['decision']}")
+        vote = decision_map.get(existing["decision"], "Maybe")
+        vote_on_study(top_study, vote)
         return existing.to_dict(), 0
 
     logger.info(f"Processing: {title}")
@@ -168,12 +170,6 @@ def classify_single_article(page, seen_titles):
     if not classification_result:
         logger.error("Gemini returned no classification. Skipping.")
         return None, 0
-
-    decision_map = {
-        "Include": "Yes",
-        "Exclude": "No",
-        "Maybe": "Maybe"
-    }
 
     vote = decision_map.get(
         classification_result.classification.value, "Maybe")
@@ -197,13 +193,13 @@ def main():
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
 
-        page.goto(SIGN_IN_URL)
+        page.goto(SIGN_IN_URL, timeout=60000)
         page.fill('#session_email', os.getenv("COVID_ID"))
         page.fill('#session_password', os.getenv("COVID_PASSWORD"))
         page.click('input[name="commit"]')
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("networkidle", timeout=60000)
 
-        page.goto(SCREENING_URL)
+        page.goto(SCREENING_URL, timeout=60000)
 
         try:
             while processed_articles < ARTICLES_TO_PROCESS:
