@@ -1,4 +1,3 @@
-````markdown
 # Covidence Screener AI Automation
 
 This project automates the title/abstract screening process on [Covidence](https://www.covidence.org/) using:
