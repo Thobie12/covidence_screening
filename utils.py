@@ -24,7 +24,7 @@ class ClassificationResult(BaseModel):
                                description="Justification for the classification")
 
 
-ARTICLES_TO_PROCESS = 2900
+ARTICLES_TO_PROCESS = 3700
 OUTPUT_CSV = 'processed_articles.csv'
 SIGN_IN_URL = "https://app.covidence.org"
 SCREENING_URL = "https://app.covidence.org/reviews/520996/review_studies/screen?filter=vote_required_from"
@@ -82,7 +82,7 @@ def init_logging():
     console_handler.setFormatter(color_formatter)
     logger.addHandler(console_handler)
 
-    file_handler = logging.FileHandler(f'covidence.log', mode='w')
+    file_handler = logging.FileHandler(f'covidence.log', mode='a')
     file_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
     return logger

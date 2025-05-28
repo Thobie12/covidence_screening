@@ -1,24 +1,20 @@
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import os
-import csv
-from utils import *
-from google import genai
+from argparse import ArgumentParser
+import time
+import pandas as pd
 from ratelimit import limits, sleep_and_retry
 from tenacity import retry, stop_after_attempt, wait_exponential
+from google import genai
 from google.genai import types
-import time
-import functools
-import pandas as pd
-import random
-# from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+from utils import *
 
 load_dotenv()
 logger = init_logging()
 
 
 def log_exceptions(func):
-    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -28,16 +24,10 @@ def log_exceptions(func):
     return wrapper
 
 
-# google_search_tool = Tool(
-#     google_search=GoogleSearch()
-# )
-
-
 def load_existing_titles(path):
     if not os.path.exists(path):
         return pd.DataFrame(columns=["title", "abstract", "decision", "justification"]).set_index("title")
-
-    return pd.read_csv(path).drop_duplicates(subset=["title"]).set_index("title")
+    return pd.read_csv(path, index_col="title")
 
 
 @limits(calls=100, period=60)
@@ -49,12 +39,12 @@ def gemini_decision(title, abstract, source_info):
         return None, 0
 
     full_prompt = USER_PROMPT + f"""
-        Title: {title}
-        Abstract: {abstract}
-        Source Info: {source_info}
-        """
+    Title: {title}
+    Abstract: {abstract}
+    Source Info: {source_info}
+    """
 
-    for key in random.sample(api_keys, len(api_keys)):
+    for key in api_keys:
         try:
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
@@ -74,7 +64,7 @@ def gemini_decision(title, abstract, source_info):
             else:
                 logger.warning("Token usage information not available.")
 
-            if not hasattr(response, "parsed") or not response.parsed:
+            if not getattr(response, "parsed", None):
                 logger.error(
                     f"No parsed response from Gemini with key ending in {key[-4:]}.")
                 continue
@@ -83,7 +73,6 @@ def gemini_decision(title, abstract, source_info):
             logger.info(
                 f"Gemini classification: {parsed.classification.value}")
             logger.info(f"Gemini justification: {parsed.justification}")
-
             return parsed, token_usage
 
         except Exception as e:
@@ -115,20 +104,13 @@ def extract_study_elements(top_study):
 
 
 def vote_on_study(top_study, value):
-    try:
-        top_study.query_selector(
-            f'td.vote button[value="{value}"]').click(force=True)
-        logger.info(f"Voted '{value}' on study.")
-    except Exception as e:
-        logger.warning(f"Could not vote '{value}' on study: {e}")
+    top_study.query_selector(
+        f'td.vote button[value="{value}"]').click(force=True)
+    logger.info(f"Voted '{value}' on study.")
 
 
 @log_exceptions
-@retry(
-    reraise=True,
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=2, min=4, max=10)
-)
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=10))
 def classify_single_article(page, seen_titles):
     page.reload()
     page.wait_for_load_state("networkidle")
@@ -153,16 +135,16 @@ def classify_single_article(page, seen_titles):
             "justification": "Title or abstract not found."
         }, 0
 
+    logger.info(f"Processing: {title}")
+
     if title in seen_titles.index:
-        existing = seen_titles.loc[title][0]
+        rows = seen_titles.loc[title]
+        existing = rows if isinstance(rows, pd.Series) else rows.iloc[0]
+
         logger.info(f"Already classified '{title}' as {existing['decision']}")
         vote = decision_map.get(existing["decision"], "Maybe")
         vote_on_study(top_study, vote)
         return existing.to_dict(), 0
-
-    logger.info(f"Processing: {title}")
-    logger.debug(f"Abstract: {abstract}")
-    logger.debug(f"Source Info: {source_info}")
 
     classification_result, tokens_used = gemini_decision(
         title, abstract, source_info)
@@ -183,63 +165,87 @@ def classify_single_article(page, seen_titles):
     }, tokens_used
 
 
-def main():
-    seen_titles = load_existing_titles(OUTPUT_CSV)
-    processed_articles = len(seen_titles)
-    total_tokens = 0
-    processed_data = []
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=1, max=10))
+def set_up_browser(p, headless):
+    browser = p.chromium.launch(headless=headless)
+    page = browser.new_page()
+
+    page.goto(SIGN_IN_URL, timeout=60000)
+    page.fill('#session_email', os.getenv("COVID_ID"))
+    page.fill('#session_password', os.getenv("COVID_PASSWORD"))
+    page.click('input[name="commit"]')
+    page.wait_for_load_state("networkidle", timeout=60000)
+
+    page.goto(SCREENING_URL, timeout=60000)
+
+    return browser, page
+
+
+def main(articles, output_csv, headless):
+
+    logger.debug("Starting Covidence classification script...")
+
+    seen_titles = load_existing_titles(output_csv)
+    processed_articles = seen_titles.shape[0]
+    total_tokens, max_tries = 0, 0
+    new_titles = pd.DataFrame(
+        columns=["title", "abstract", "decision", "justification"]).set_index("title")
+
+    logger.info(f"Loaded {processed_articles} previously processed articles.")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
-
-        page.goto(SIGN_IN_URL, timeout=60000)
-        page.fill('#session_email', os.getenv("COVID_ID"))
-        page.fill('#session_password', os.getenv("COVID_PASSWORD"))
-        page.click('input[name="commit"]')
-        page.wait_for_load_state("networkidle", timeout=60000)
-
-        page.goto(SCREENING_URL, timeout=60000)
+        browser, page = set_up_browser(p, headless)
 
         try:
-            while processed_articles < ARTICLES_TO_PROCESS:
+            while processed_articles < articles:
                 start_time = time.time()
                 article, tokens_used = classify_single_article(
                     page, seen_titles)
+
                 if article:
-                    processed_data.append(article)
+                    new_titles = pd.concat(
+                        [new_titles, pd.DataFrame.from_records([article], index="title")])
+                    seen_titles = pd.concat(
+                        [seen_titles, pd.DataFrame.from_records([article], index="title")])
                     processed_articles += 1
                     total_tokens += tokens_used
+                    max_tries = 0
                     logger.info(f"Processed articles: {processed_articles}")
                 else:
-                    logger.info("Not a valid study. Moving on...")
-                    # break
-                elapsed_time = time.time() - start_time
+                    max_tries += 1
+                    if max_tries >= 5:
+                        logger.error("Max tries reached. Exiting.")
+                        break
+                    logger.info("Retrying as article was None.")
+
                 logger.info(
-                    f"Time taken for this article: {elapsed_time:.2f} seconds")
-                logger.info("*" * 30 + '\n')
-                # page.wait_for_timeout(500)
+                    f"Time taken: {time.time() - start_time:.2f} seconds")
+                logger.debug("*" * 30 + "\n")
 
         except Exception as e:
-            logger.exception("An error occurred during classification loop")
+            logger.exception("Error in classification loop")
 
         finally:
-            logger.info(f"Total processed articles: {processed_articles}")
+            logger.info(f"Total processed: {processed_articles}")
             logger.info(f"Total tokens used: {total_tokens}")
-            logger.info("Writing processed data to CSV...")
 
-            output_csv_exists = os.path.exists(OUTPUT_CSV)
-            with open(OUTPUT_CSV, 'a+', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=[
-                                        "title", "abstract", "decision", "justification"])
-                if not output_csv_exists:
-                    writer.writeheader()
-                writer.writerows(processed_data)
+            new_titles.to_csv(output_csv, mode='a',
+                              header=not os.path.exists(output_csv), index=True)
 
-            logger.info("Data written to CSV successfully.")
+            logger.debug("Data saved.")
             time.sleep(5)
             browser.close()
 
 
 if __name__ == "__main__":
-    main()
+    parser = ArgumentParser(
+        description="Covidence Article Classification Script")
+    parser.add_argument("--articles", type=int, default=ARTICLES_TO_PROCESS,
+                        help="Number of articles to process")
+    parser.add_argument("--output", type=str, default=OUTPUT_CSV,
+                        help="Output CSV file for processed articles")
+    parser.add_argument("--headless", action="store_true",
+                        help="Run browser in headless mode")
+    args = parser.parse_args()
+
+    main(articles=args.articles, output_csv=args.output, headless=args.headless)
