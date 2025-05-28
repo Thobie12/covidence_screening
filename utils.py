@@ -2,12 +2,20 @@ import logging
 import colorlog
 from pydantic import BaseModel, Field
 from enum import Enum
+from typing import TypedDict
 
 
 class Classification(Enum):
     INCLUDE = "Include"
     EXCLUDE = "Exclude"
     MAYBE = "Maybe"
+    
+
+class Article(TypedDict):
+    title: str
+    abstract: str
+    decision: str
+    justification: str
 
 
 decision_map = {

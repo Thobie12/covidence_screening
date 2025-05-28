@@ -1,4 +1,5 @@
-from playwright.sync_api import sync_playwright
+from typing import Optional, Tuple, Dict, Any, List
+from playwright.sync_api import sync_playwright, Browser, Page, Playwright, ElementHandle
 from dotenv import load_dotenv
 from argparse import ArgumentParser
 import os
@@ -15,28 +16,29 @@ logger = init_logging()
 
 
 class CovidenceClassifier:
-    def __init__(self, output_csv: str, headless: bool, article_limit: int):
-        self.output_csv = output_csv
-        self.headless = headless
-        self.article_limit = article_limit
-        self.total_tokens = 0
-        self.max_tries = 0
-        self.seen_titles = self.load_existing_titles(self.output_csv)
-        self.processed_articles = self.seen_titles.shape[0]
-        self.new_articles = []
-        
-        # the reason for doing this is that Gemini has stringent rate limits but these only apply per project. So if you create multiple projects and use api keys from different projects, you can effectively increase your rate limit. 
-        self.gemini_clients = {key: genai.Client(api_key=key.strip()) for key in os.getenv(
-            "GEMINI_API_KEY", "").split(",") if key}
+    def __init__(self, output_csv: str, headless: bool, article_limit: int) -> None:
+        self.output_csv: str = output_csv
+        self.headless: bool = headless
+        self.article_limit: int = article_limit
+        self.total_tokens: int = 0
+        self.max_tries: int = 0
+        self.seen_titles: pd.DataFrame = self.load_existing_titles(
+            self.output_csv)
+        self.processed_articles: int = self.seen_titles.shape[0]
+        self.new_articles: List[Article] = []
+        self.gemini_clients: Dict[str, genai.Client] = {
+            key: genai.Client(api_key=key.strip())
+            for key in os.getenv("GEMINI_API_KEY", "").split(",") if key
+        }
 
     @staticmethod
-    def load_existing_titles(csv_path):
+    def load_existing_titles(csv_path: str) -> pd.DataFrame:
         if not os.path.exists(csv_path):
             return pd.DataFrame(columns=["title", "abstract", "decision", "justification"]).set_index("title")
         return pd.read_csv(csv_path, index_col="title")
 
     @staticmethod
-    def handle_popover(page):
+    def handle_popover(page: Page) -> None:
         try:
             if page.is_visible('button[aria-label="Close popover"]'):
                 page.click('button[aria-label="Close popover"]')
@@ -44,7 +46,7 @@ class CovidenceClassifier:
             logger.debug(f"Popover close attempt failed: {e}")
 
     @staticmethod
-    def extract_study_elements(top_study):
+    def extract_study_elements(top_study: Optional[ElementHandle]) -> Tuple[str, str, str]:
         try:
             title = top_study.query_selector('h3.title').inner_text().strip()
             abstract = top_study.query_selector(
@@ -57,7 +59,7 @@ class CovidenceClassifier:
             return "", "", ""
 
     @staticmethod
-    def vote_on_study(top_study, value):
+    def vote_on_study(top_study: Optional[ElementHandle], value: str) -> None:
         try:
             top_study.query_selector(
                 f'td.vote button[value="{value}"]').click(force=True)
@@ -66,7 +68,7 @@ class CovidenceClassifier:
             logger.warning(f"Could not vote '{value}' on study: {e}")
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-    def set_up_browser(self, p):
+    def set_up_browser(self, p: Playwright) -> Tuple[Browser, Page]:
         browser = p.chromium.launch(headless=self.headless)
         page = browser.new_page()
 
@@ -80,20 +82,18 @@ class CovidenceClassifier:
         return browser, page
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=10))
-    def classify_single_article(self, page):
+    def classify_single_article(self, page: Page) -> Tuple[Optional[Article], int]:
         page.reload()
         page.wait_for_load_state("networkidle")
         page.wait_for_selector('tr[id^="study-"]', timeout=6000)
 
         self.handle_popover(page)
-
         top_study = page.query_selector('tr[id^="study-"]')
         if not top_study:
             logger.info("No study found.")
             return None, 0
 
-        title, abstract, source_info = self.extract_study_elements(
-            top_study)
+        title, abstract, source_info = self.extract_study_elements(top_study)
 
         if not title or not abstract:
             logger.warning("Missing title or abstract. Voting 'Maybe'.")
@@ -108,13 +108,19 @@ class CovidenceClassifier:
         logger.info(f"Processing: {title}")
 
         if title in self.seen_titles.index:
-            rows = self.seen_titles.loc[title]
-            existing = rows if isinstance(rows, pd.Series) else rows.iloc[0]
+            existing = self.seen_titles.loc[title]
+            if isinstance(existing, pd.DataFrame):
+                existing = existing.iloc[0]
             logger.info(
                 f"Already classified '{title}' as {existing['decision']}")
             vote = decision_map.get(existing["decision"], "Maybe")
             self.vote_on_study(top_study, vote)
-            return existing.to_dict(), 0
+            return {
+                "title": title,
+                "abstract": existing["abstract"],
+                "decision": existing["decision"],
+                "justification": existing["justification"]
+            }, 0
 
         classification_result, tokens_used = self.gemini_decision(
             title, abstract, source_info)
@@ -136,12 +142,7 @@ class CovidenceClassifier:
 
     @limits(calls=100, period=60)
     @sleep_and_retry
-    def gemini_decision(self, title, abstract, source_info):
-        api_keys = os.getenv("GEMINI_API_KEY", "").split(",")
-        if not api_keys:
-            logger.error("No GEMINI_API_KEY found in environment.")
-            return None, 0
-
+    def gemini_decision(self, title: str, abstract: str, source_info: str) -> Tuple[Optional[ClassificationResult], int]:
         full_prompt = USER_PROMPT + f"""
         Title: {title}
         Abstract: {abstract}
@@ -162,9 +163,6 @@ class CovidenceClassifier:
 
                 token_usage = getattr(
                     response.usage_metadata, 'total_token_count', 0)
-                if token_usage:
-                    logger.info(f"Token Usage: {token_usage}")
-
                 if not getattr(response, "parsed", None):
                     logger.error(
                         f"No parsed response from Gemini with key ending in {key[-4:]}.")
@@ -182,7 +180,7 @@ class CovidenceClassifier:
         logger.error("All API keys failed.")
         return None, 0
 
-    def save_article(self, article, tokens_used):
+    def save_article(self, article: Article, tokens_used: int) -> None:
         self.new_articles.append(article)
         df = pd.DataFrame.from_records([article], index="title")
         self.seen_titles = pd.concat([self.seen_titles, df])
@@ -190,7 +188,7 @@ class CovidenceClassifier:
         self.processed_articles += 1
         self.max_tries = 0
 
-    def save_to_csv(self):
+    def save_to_csv(self) -> None:
         if not self.new_articles:
             logger.info("No new articles to save.")
             return
@@ -199,7 +197,7 @@ class CovidenceClassifier:
                   header=not os.path.exists(self.output_csv), index=True)
         logger.debug("Data saved.")
 
-    def run(self):
+    def run(self) -> None:
         logger.debug("Starting Covidence classification script...")
         logger.info(
             f"Loaded {self.processed_articles} previously processed articles.")
