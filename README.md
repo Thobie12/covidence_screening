@@ -1,53 +1,48 @@
+Here’s a **revised README** for your Covidence Screener AI Automation project, with the actual script behaviors and technical details reflected based on your latest `main.py` and `utils.py`.
+This rewrite is **explicit and technical** — no fluff, just the truth about what your code does and how it works.
+
+---
+
 # Covidence Screener AI Automation
 
-This project automates the title/abstract screening process on [Covidence](https://www.covidence.org/) using:
-
-- [Playwright](https://playwright.dev/python/) for browser automation
-- [Google Gemini](https://ai.google.dev) for intelligent article classification (via the `gemini-2.5-pro-preview` model)
-- A custom systematic review protocol
-- Pydantic and Tenacity for structured handling and retries
-- CSV tracking to persist previous classifications
+**Automate Covidence systematic review screening with Playwright + Google Gemini AI**
 
 ---
 
 ## 🔍 Overview
 
-The script logs into Covidence, loads new studies for screening, and classifies them according to a user-supplied review protocol using a Gemini LLM.
+This project **automates title/abstract screening on [Covidence](https://www.covidence.org/)** by integrating:
 
-It automates voting as:
-- **Yes** for "Include"
-- **No** for "Exclude"
-- **Maybe** for undecidable abstracts
+* [Playwright (Python)](https://playwright.dev/python/) for browser automation (not web scraping, but *actual* browser interaction)
+* [Google Gemini](https://ai.google.dev) (via `gemini-2.5-pro-preview` or later) for LLM-based article classification
+* Your own systematic review protocol (in `protocol.txt`)
+* Pydantic and Tenacity for validation, structured error handling, and retries
+* CSV tracking to avoid duplicate processing
 
-All classifications and justifications are logged and saved to a CSV.
+**Process:**
 
----
-
-## 🧠 Features
-
-- Fully automated login and navigation to screening page
-- Intelligent classification based on protocol
-- Persistent tracking via `processed_articles.csv`
-- Built-in retry and rate-limiting to avoid overloading the LLM API
-- Uses environment variables and local `.env` config for credentials and API keys
-- Detailed logging to `covidence.log`
+1. Script logs into Covidence with credentials from `.env`
+2. Navigates to screening queue
+3. Extracts title, abstract, and source info for each study
+4. Sends these to Gemini LLM, enforcing your custom protocol
+5. Automates the Yes/No/Maybe vote, logs the justification
+6. Results are logged (console + `covidence.log`) and appended to `processed_articles.csv`
 
 ---
 
 ## 🧰 Dependencies
 
-This project uses Python 3.10 and the following key libraries:
+* `Python 3.10+`
+* `playwright`
+* `pydantic`
+* `tenacity`
+* `ratelimit`
+* `google-generativeai`
+* `dotenv`
+* `pandas`
+* `colorlog`
 
-- `playwright`
-- `pydantic`
-- `tenacity`
-- `ratelimit`
-- `google-generativeai`
-- `dotenv`
-- `pandas`
-- `colorlog`
-
-These will install automatically when you run `uv run`
+> All install via `uv run main.py` (using your `pyproject.toml`)
 
 ---
 
@@ -55,100 +50,124 @@ These will install automatically when you run `uv run`
 
 ```
 .
-├── main.py                 # Entry point script for automation
-├── utils.py                # Logging and classification utilities
-├── protocol.txt            # The review protocol for LLM
-├── processed_articles.csv  # Output file to track decisions
-├── .env                    # Stores credentials and API keys
-├── covidence.log           # Log file for debug and audit
-├── .venv/                  # Virtual environment (not tracked in Git)
-├── pyproject.toml          # Project metadata and dependencies
-└── README.md               # You're reading it!
+├── main.py                 # Main automation script
+├── utils.py                # Logging, data classes, config, prompts
+├── protocol.txt            # Your review protocol
+├── processed_articles.csv  # Output: processed article results
+├── .env                    # Credentials & Gemini API keys
+├── covidence.log           # Logging output
+├── .venv/                  # Python virtual environment
+├── pyproject.toml          # Dependencies & metadata
+└── README.md               # (You are here)
 ```
 
 ---
 
 ## ⚙️ Setup
 
-### 1. Clone the Repo
+**1. Clone the repo**
 
 ```bash
-git clone https://github.com/yourname/covidence.git
-cd covidence
+git clone https://github.com/yourname/covidence_screening.git
+cd covidence_screening
 ```
 
-### 2. Create `.env` File
-
-Copy the following template into a `.env` file in the root directory:
+**2. Prepare your `.env` file**
 
 ```env
 COVID_ID=your_covidence_email
 COVID_PASSWORD=your_password
-GEMINI_API_KEY=your_gemini_api_key1,your_gemini_api_key2
+GEMINI_API_KEY=key1,key2,key3
 ```
 
-### 3. Add Your Review Protocol
+* *Multiple Gemini API keys are supported and **used in round-robin fashion** to avoid rate-limits.*
 
-Make sure your `protocol.txt` is present and contains the detailed inclusion/exclusion criteria.
+**3. Put your review protocol in `protocol.txt`**
+
+* This is the set of rules the LLM will follow for every screening call.
 
 ---
 
 ## 🚀 Usage
 
-Run the automation using:
+**Command:**
 
 ```bash
-uv run main.py
+uv run main.py [--articles N] [--output FILE] [--headless]
 ```
 
-The script will:
+* `--articles` — Number of articles to process (default: 3700, see `ARTICLES_TO_PROCESS` in `utils.py`)
+* `--output` — CSV output file (default: `processed_articles.csv`)
+* `--headless` — Run browser in headless mode (default: False, i.e., browser window is shown for debug)
 
-1. Log into Covidence
-2. Open the screening page
-3. Extract each study's title and abstract
-4. Classify using Gemini
-5. Vote accordingly and log decision
-6. Save results to `processed_articles.csv`
+### **What actually happens:**
 
-You can adjust how many articles to process by editing the `ARTICLES_TO_PROCESS` constant in `utils.py`.
+* Loads Covidence with supplied credentials
+* Navigates to the screening queue (hardcoded `SCREENING_URL`)
+* For each study row:
 
----
+  * Extracts title, abstract, and source-info (via Playwright selectors)
+  * **Checks for duplicates:** if title already in output CSV, votes accordingly and skips LLM call
+  * Otherwise, sends to Gemini model (rotates through API keys on failure/rate-limit)
+  * Maps LLM output (`Include`, `Exclude`, `Maybe`) to Covidence vote (`Yes`, `No`, `Maybe`)
+  * Saves title, abstract, decision, justification to CSV
+  * Detailed log to `covidence.log` and console
 
-## 🧪 Testing & Debugging
+### **Important:**
 
-* To debug a specific issue, review `covidence.log` for detailed traces.
-* Use `headless=False` (default) to visually inspect the Playwright browser.
-* Adjust timeouts in `main.py` if you're experiencing network delays or slow loading.
-
----
-
-## 🧼 Cleaning & Maintenance
-
-* **CSV deduplication** is handled at load time via `drop_duplicates`.
-* **Retry logic** is built-in to the classification method with exponential backoff.
-* **Failed classifications** are logged and skipped.
+* **If extraction fails** (missing title/abstract): votes `Maybe` and logs reason.
+* **Retries**: On browser or API failure, up to 3 attempts (with exponential backoff).
+* **Gemini usage:** Only “Include”, “Exclude”, or “Maybe” are valid, enforced by model prompt and validation.
+* **No duplicate votes:** already-screened titles (by exact string match) are skipped.
 
 ---
 
-## 🛡️ Notes
+## 🧪 Debugging
 
-* Google Gemini API usage is rate-limited — avoid hitting quotas or exhausting keys.
+* Console and file logging (color-coded for console, plain for file).
+* Debug specific issues in `covidence.log`
+* **Visual mode** by default: browser window opens so you can see automation step-by-step.
+  Use `--headless` for true automation.
+* **Timeouts and retries**: all major actions (login, navigation, classification) are retried automatically.
 
 ---
 
-## 🙋 FAQ
+## 🛡️ FAQ
 
-**Q: What happens if the model can’t classify?**
-A: It returns `"Maybe"` and logs a justification.
+* **Q: What if Gemini can’t classify?**
+  **A:** Returns `Maybe`, with a justification.
 
-**Q: Does it re-process previously classified titles?**
-A: No — `processed_articles.csv` is checked on each run to avoid duplication.
+* **Q: Does it process already-screened studies?**
+  **A:** No — checks the output CSV by title.
 
-**Q: Can I use a different model/provider?**
-A: Yes, with slight modification to `gemini_decision()` logic.
+* **Q: Can I use other models/providers?**
+  **A:** Yes, if you update the `gemini_decision()` logic.
+
+* **Q: Is my protocol enforced?**
+  **A:** Yes — every call passes your entire protocol from `protocol.txt` and *the system prompt hard-codes the review topic*.
+
+* **Q: Is this for commercial use?**
+  **A:** **NO**. Academic/research only.
+
+---
+
+## ⚡ Technical Notes
+
+* **Rate limits:**
+  100 calls/min enforced via `ratelimit` decorator.
+  Multiple API keys are *actively rotated* (not just for backup).
+
+* **Output format:**
+  All results saved as rows in `processed_articles.csv` with columns:
+  `title`, `abstract`, `decision`, `justification`
+  (title is the index).
+
+* **Pydantic Models:**
+  LLM is forced to return a valid enum (`Include`, `Exclude`, `Maybe`) and a free-text justification, or it fails validation and retries.
 
 ---
 
 ## 📜 License
 
-This repository is provided for academic and research use. Not for commercial deployment.
+Creative Commons Attribution-NonCommercial 4.0 International Public
+LicensePlease see the [LICENSE](LICENSE) file for more details.
