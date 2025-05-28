@@ -1,8 +1,3 @@
-Here’s a **revised README** for your Covidence Screener AI Automation project, with the actual script behaviors and technical details reflected based on your latest `main.py` and `utils.py`.
-This rewrite is **explicit and technical** — no fluff, just the truth about what your code does and how it works.
-
----
-
 # Covidence Screener AI Automation
 
 **Automate Covidence systematic review screening with Playwright + Google Gemini AI**
