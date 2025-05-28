@@ -28,6 +28,7 @@ ARTICLES_TO_PROCESS = 3700
 OUTPUT_CSV = 'processed_articles.csv'
 SIGN_IN_URL = "https://app.covidence.org"
 SCREENING_URL = "https://app.covidence.org/reviews/520996/review_studies/screen?filter=vote_required_from"
+GEMINI_MODEL = "gemini-2.5-pro-preview-05-06"
 
 with open('protocol.txt', 'r') as file:
     protocol = file.read()
