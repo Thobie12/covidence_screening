@@ -24,6 +24,8 @@ class CovidenceClassifier:
         self.seen_titles = self.load_existing_titles(self.output_csv)
         self.processed_articles = self.seen_titles.shape[0]
         self.new_articles = []
+        
+        # the reason for doing this is that Gemini has stringent rate limits but these only apply per project. So if you create multiple projects and use api keys from different projects, you can effectively increase your rate limit. 
         self.gemini_clients = {key: genai.Client(api_key=key.strip()) for key in os.getenv(
             "GEMINI_API_KEY", "").split(",") if key}
 
