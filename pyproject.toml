@@ -1,12 +1,12 @@
 [project]
 name = "covidence"
-version = "0.1.0"
-description = "A tool for classifying articles on Covidence"
+version = "0.2.0"
+description = "A tool for classifying articles on Covidence using Claude"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic>=0.40.0",
     "colorlog>=6.9.0",
-    "google-genai>=1.16.1",
     "pandas>=2.2.3",
     "playwright>=1.52.0",
     "python-dotenv>=1.1.0",
