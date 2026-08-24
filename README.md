@@ -1,168 +1,169 @@
-# Covidence Screener AI Automation
+# Covidence Screener — Claude Edition
 
-**Automate Covidence systematic review screening with Playwright + Google Gemini AI**
+Automates title/abstract screening on [Covidence](https://www.covidence.org/) using Playwright for
+browser automation and **Claude** (Anthropic) for classification, with a built-in
+random human spot-check so you can keep an eye on the AI without reviewing every article.
 
----
-
-## 🔍 Overview
-
-This project **automates title/abstract screening on [Covidence](https://www.covidence.org/)** by integrating:
-
-* [Playwright (Python)](https://playwright.dev/python/) for browser automation (not web scraping, but *actual* browser interaction)
-* [Google Gemini](https://ai.google.dev) (via `gemini-2.5-pro-preview` or later) for LLM-based article classification
-* Your own systematic review protocol (in `protocol.txt`)
-* Pydantic and Tenacity for validation, structured error handling, and retries
-* CSV tracking to avoid duplicate processing
-
-**Process:**
-
-1. Script logs into Covidence with credentials from `.env`
-2. Navigates to screening queue
-3. Extracts title, abstract, and source info for each study
-4. Sends these to Gemini LLM, enforcing your custom protocol
-5. Automates the Yes/No/Maybe vote, logs the justification
-6. Results are logged (console + `covidence.log`) and appended to `processed_articles.csv`
+This is a fork of [Aisha630/covidence_screening](https://github.com/Aisha630/covidence_screening),
+adapted to: (1) run on Claude instead of Gemini, (2) work for *any* Covidence
+review out of the box instead of one hardcoded review, and (3) pause for a
+random sample of decisions so you can confirm the AI is on track.
 
 ---
 
-## 🧰 Dependencies
+## What it does
 
-* `Python 3.10+`
-* `playwright`
-* `pydantic`
-* `tenacity`
-* `ratelimit`
-* `google-generativeai`
-* `dotenv`
-* `pandas`
-* `colorlog`
-
-> All install via `uv run main.py` (using your `pyproject.toml`)
-
----
-
-## 🗂️ Directory Structure
-
-```
-.
-├── main.py                 # Main automation script
-├── utils.py                # Logging, data classes, config, prompts
-├── protocol.txt            # Your review protocol
-├── processed_articles.csv  # Output: processed article results
-├── .env                    # Credentials & Gemini API keys
-├── covidence.log           # Logging output
-├── .venv/                  # Python virtual environment
-├── pyproject.toml          # Dependencies & metadata
-└── README.md               # (You are here)
-```
+1. Logs into Covidence with credentials from `.env`
+2. Opens your review's screening queue
+3. For each study: reads the title/abstract, checks if it's already been
+   processed (skips re-classifying), otherwise sends it to Claude along with
+   your protocol
+4. Claude returns `Include` / `Exclude` / `Maybe` + a justification
+5. **Randomly, for a configurable fraction of articles, the script pauses and
+   shows you the AI's decision before submitting the vote** — you can
+   approve, override, or skip
+6. Casts the vote on Covidence (`Yes` / `No` / `Maybe`) and logs everything to
+   `processed_articles.csv` (and spot-checks to `spot_check_log.csv`)
 
 ---
 
-## ⚙️ Setup
+## Setup (one-time)
 
-**1. Clone the repo**
-
+**1. Install [uv](https://docs.astral.sh/uv/)** if you don't have it:
 ```bash
-git clone https://github.com/yourname/covidence_screening.git
-cd covidence_screening
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**2. Prepare your `.env` file**
+**2. Install dependencies and the Playwright browser:**
+```bash
+uv sync
+uv run playwright install chromium
+```
 
+**3. Create your `.env` file** (copy `.env.sample` → `.env` and fill in):
 ```env
 COVID_ID=your_covidence_email
-COVID_PASSWORD=your_password
-GEMINI_API_KEY=key1,key2,key3
+COVID_PASSWORD=your_covidence_password
+ANTHROPIC_API_KEY=sk-ant-...
+COVIDENCE_REVIEW_URL=https://app.covidence.org/reviews/<your_review_id>/review_studies/screen?filter=vote_required_from
+REVIEW_TITLE=Efficacy of X for Y in Z population
 ```
+To get `COVIDENCE_REVIEW_URL`: open your review in a browser, go to the
+screening tab filtered to studies awaiting your vote, and copy that exact URL.
 
-* *Multiple Gemini API keys are supported and **used in round-robin fashion** to avoid rate-limits.*
+Get an Anthropic API key at https://console.anthropic.com/ (Settings → API Keys).
+You can comma-separate multiple keys (`key1,key2`) if you want to round-robin
+across them for rate limits.
 
-**3. Put your review protocol in `protocol.txt`**
-
-* This is the set of rules the LLM will follow for every screening call.
+**4. Write your protocol.** Open `protocol.txt` and replace the placeholder
+with your review's actual inclusion/exclusion criteria (e.g. copy from your
+PROSPERO registration or protocol document). The more precise and numbered
+your criteria, the more consistent Claude's decisions will be.
 
 ---
 
-## 🚀 Usage
-
-**Command:**
+## Running it
 
 ```bash
-uv run main.py [--articles N] [--output FILE] [--headless]
+uv run main.py
 ```
 
-* `--articles` — Number of articles to process (default: 3700, see `ARTICLES_TO_PROCESS` in `utils.py`)
-* `--output` — CSV output file (default: `processed_articles.csv`)
-* `--headless` — Run browser in headless mode (default: False, i.e., browser window is shown for debug)
+Useful flags:
 
-### **What actually happens:**
+| Flag | Default | What it does |
+|---|---|---|
+| `--articles N` | 3700 | Stop after this many total processed articles |
+| `--output FILE` | `processed_articles.csv` | Where results are logged |
+| `--headless` | off | Hide the browser window (still shows console prompts) |
+| `--spot-check-rate R` | 0.1 | Fraction of Include/Exclude decisions (0.0–1.0) that pause for your review. Every `Maybe` is *always* spot-checked regardless of this. |
 
-* Loads Covidence with supplied credentials
-* Navigates to the screening queue (hardcoded `SCREENING_URL`)
-* For each study row:
+Examples:
+```bash
+# Spot-check ~25% of Include/Exclude decisions instead of the default 10%
+# (Maybe is always checked no matter what)
+uv run main.py --spot-check-rate 0.25
 
-  * Extracts title, abstract, and source-info (via Playwright selectors)
-  * **Checks for duplicates:** if title already in output CSV, votes accordingly and skips LLM call
-  * Otherwise, sends to Gemini model (rotates through API keys on failure/rate-limit)
-  * Maps LLM output (`Include`, `Exclude`, `Maybe`) to Covidence vote (`Yes`, `No`, `Maybe`)
-  * Saves title, abstract, decision, justification to CSV
-  * Detailed log to `covidence.log` and console
+# Turn off the RANDOM sample (Maybe decisions still always pause)
+uv run main.py --spot-check-rate 0 --headless
 
-### **Important:**
+# Only process the next 50 articles
+uv run main.py --articles 50
+```
 
-* **If extraction fails** (missing title/abstract): votes `Maybe` and logs reason.
-* **Retries**: On browser or API failure, up to 3 attempts (with exponential backoff).
-* **Gemini usage:** Only “Include”, “Exclude”, or “Maybe” are valid, enforced by model prompt and validation.
-* **No duplicate votes:** already-screened titles (by exact string match) are skipped.
+### How the spot-check works
+
+A study gets spot-checked if Claude classified it as `Maybe` (always — it's
+already the least-confident call) OR at random for `Include`/`Exclude`
+(probability = `--spot-check-rate` per article). When that happens, the
+script prints the title, abstract, source info, and Claude's proposed
+decision + justification, then waits for you at the terminal:
+
+```
+[Enter]=approve  i=Include  e=Exclude  m=Maybe  f=flag for your own manual follow-up (still votes as shown above):
+```
+
+- **Enter** — accept Claude's decision as-is
+- **i / e / m** — override with your own decision (only logged as an
+  "override" if it's actually different from what Claude said — typing the
+  same letter Claude already landed on just counts as a confirmation)
+- **f** — flag this one for you to revisit yourself later in the Covidence
+  UI (note: it still casts Claude's original vote now — Covidence's queue
+  always shows the next study still needing *your* vote, so there's no way
+  for the script to truly leave one un-voted without getting stuck showing
+  you that same article forever)
+
+Every spot-check is appended to `spot_check_log.csv` (columns: title,
+ai_decision, human_action, final_decision) so you have an audit trail of how
+often you actually agreed with the AI vs. overrode it — useful for deciding
+whether to raise or lower `--spot-check-rate` as you go, and as documentation
+of your screening process.
+
+### Learning from your corrections
+
+When you override a decision (`i`/`e`/`m`), the script asks a follow-up:
+*"Why?"* — one line, optional but worth typing. If you answer, that
+correction (what Claude got wrong, what it should have been, and your
+reason) is saved to `learned_corrections.jsonl` and automatically included
+in the prompt for every article classified afterward — including the rest
+of this run and any future runs, since the file persists.
+
+This is in-context learning, not real fine-tuning — there's no training
+step, Claude is just shown its own past mistakes on this review each time
+it classifies a new article, so it doesn't repeat the same category of
+error (e.g. an animal study described in human-clinical language). To keep
+the prompt from growing forever, only the most recent 25 corrections are
+included (configurable via `MAX_LEARNED_CORRECTIONS` in `.env`). Skipping
+the "why" prompt (just hitting Enter) still logs the override to
+`spot_check_log.csv` for the audit trail, it just won't teach Claude
+anything from that one.
+
+Since this pauses on the console (not the browser), it works whether or not
+you pass `--headless` — just don't walk away mid-run if spot-check is > 0,
+or the script will sit waiting for your input.
 
 ---
 
-## 🧪 Debugging
+## Notes / gotchas
 
-* Console and file logging (color-coded for console, plain for file).
-* Debug specific issues in `covidence.log`
-* **Visual mode** by default: browser window opens so you can see automation step-by-step.
-  Use `--headless` for true automation.
-* **Timeouts and retries**: all major actions (login, navigation, classification) are retried automatically.
+* **Duplicate protection:** articles already in your output CSV (by exact
+  title match) are re-voted the same way without calling Claude again.
+* **If extraction fails** (missing title/abstract on the page): votes `Maybe`
+  automatically and logs why.
+* **Retries:** browser and API calls retry automatically (up to 3 attempts,
+  exponential backoff).
+* **Rate limiting:** capped at 100 Claude calls/minute.
+* **Switching models:** change `CLAUDE_MODEL` in `.env` to use a different
+  Claude model (e.g. a cheaper/faster one for a first pass, or a stronger one
+  for edge cases).
+* **Academic/research use only** — see `LICENSE` (CC BY-NC 4.0), same as the
+  original project.
 
----
+## Troubleshooting
 
-## 🛡️ FAQ
-
-* **Q: What if Gemini can’t classify?**
-  **A:** Returns `Maybe`, with a justification.
-
-* **Q: Does it process already-screened studies?**
-  **A:** No — checks the output CSV by title.
-
-* **Q: Can I use other models/providers?**
-  **A:** Yes, if you update the `gemini_decision()` logic.
-
-* **Q: Is my protocol enforced?**
-  **A:** Yes — every call passes your entire protocol from `protocol.txt` and *the system prompt hard-codes the review topic*.
-
-* **Q: Is this for commercial use?**
-  **A:** **NO**. Academic/research only.
-
----
-
-## ⚡ Technical Notes
-
-* **Rate limits:**
-  100 calls/min enforced via `ratelimit` decorator.
-  Multiple API keys are *actively rotated* (not just for backup).
-
-* **Output format:**
-  All results saved as rows in `processed_articles.csv` with columns:
-  `title`, `abstract`, `decision`, `justification`
-  (title is the index).
-
-* **Pydantic Models:**
-  LLM is forced to return a valid enum (`Include`, `Exclude`, `Maybe`) and a free-text justification, or it fails validation and retries.
-
----
-
-## 📜 License
-
-Creative Commons Attribution-NonCommercial 4.0 International Public
-LicensePlease see the [LICENSE](LICENSE) file for more details.
+* `RuntimeError: COVIDENCE_REVIEW_URL is not set` — you haven't filled in `.env` yet.
+* `RuntimeError: ANTHROPIC_API_KEY is not set` — same, add your key.
+* `Protocol file 'protocol.txt' not found` — make sure `protocol.txt` exists
+  in the same folder as `main.py` and isn't still just the placeholder text.
+* Login fails — double check `COVID_ID`/`COVID_PASSWORD`, and that Covidence
+  doesn't require 2FA on this account (if it does, log in manually once in a
+  non-headless run to clear any prompts, then re-run).
